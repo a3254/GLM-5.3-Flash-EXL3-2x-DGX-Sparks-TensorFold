@@ -1,0 +1,219 @@
+# Migrated from: 2sparks/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold (v1.3.2)
+# The first recipe on TensorFold (ashhart/TensorFold v0.6.0): not a vLLM fork
+# but its own CUDA engine, one `tensorfold serve` per Spark, rank 0 serving
+# the API. The same checkpoint as glm-5.3-flash-exl3-2x, a different stack:
+# 4 requests over one shared FP8 KV pool, the full 1,048,576-token window,
+# DFlash2 plus copy drafts, vision. Upstream's numbers (README, sparkDash, GPU
+# clocks capped at 2,200 MHz): decode 60.4 tok/s at 1 request, 108.8 in all at
+# 4; prefill ~1,950 tok/s to 64k, 1,642 at 262k.
+#
+# What upstream's start.sh does that sparky does itself: the RoCE link and GID
+# discovery (sparky_node/fabric.py, the same NCCL_IB_HCA / NCCL_IB_GID_INDEX /
+# NCCL_SOCKET_IFNAME it passes; patch 0006's RoCE all-gather reads the HCA and
+# GID from those two NCCL variables), the worker's copy of the weights, the
+# rank launch, /health. What it does that sparky does NOT: the one-shot window
+# refit (rank 0 refusing --context names the largest window that fits, and
+# start.sh restarts once with it) and the ~110 GiB MemAvailable warning. A
+# start with too little free memory here fails with TensorFold's own message
+# naming that window; set `context` in a lane, or free the memory.
+
+name: glm-5.3-flash-exl3-2x-tensorfold
+engine: tensorfold
+description: "GLM-5.3-Flash EXL3 4bpw across two DGX Sparks on TensorFold: 4 streams, 1M window, FP8 KV, DFlash2, vision"
+# The vLLM recipe's name, not upstream's GLM-5.3-Flash-EXL3, so a client can
+# move between the two stacks without changing its model id.
+served_model_name: glm-5.3-flash
+
+# The upstream commit this fork's recipe was validated against: `sparky
+# upstream status` shows what has changed there since. Dropped once the
+# recipe is merged upstream, where it would only name its own repo.
+upstream:
+  repo: MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold
+  branch: main
+  revision: 92bf731c3aac61927726ef0c422b21b42111f2c4
+
+artifacts:
+  # The same artifact as glm-5.3-flash-exl3-2x, so both recipes serve ONE
+  # cached copy. Upstream pins Mia-AiLab@9eaebb7c (config.sh MODEL_REVISION);
+  # that revision's 144 files differ from 25a44fdb only in README.md (hub
+  # manifests compared 2026-10-02), and 25a44fdb's 120 shards, tokenizer,
+  # config and index are byte-identical to the mirror's aba59d21 (see the
+  # sibling recipe). Upstream's README calls its repo a byte-identical mirror
+  # of this one. Same weights, no second 164 GiB download.
+  - id: main
+    source: hf
+    repo: brandonmusic/GLM-5.3-Flash-tr3-4bpw
+    revision: aba59d2175e1ee2887ae0ae1300ba848b1deed84
+    fallback_repo: Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+    # Upstream's own pin, rather than the sibling's 25a44fdb: README.md is the
+    # only difference between them.
+    fallback_revision: 9eaebb7c4e96d983dcd538e18624622ba5b820a8
+    layout: hub
+    workers: 4
+    verify: sha256_tree
+    expected_shards: 120
+    size_gib: 164.0
+    exclude: ["runtime-results/**", "src/**", "runtime/src/**", "scripts/**", "docs/**", "results/**", ".materialization/**", "runtime/scripts/**"]
+
+  # Upstream's DFLASH2_REVISION, and the revision the sibling recipe and the
+  # fleet's cache already hold. Licensed CC BY-NC-ND 4.0, non-commercial use
+  # only: the `mtp` lane serves without it.
+  - id: dflash2
+    source: hf
+    repo: incoai/GLM-5.3-Flash-DFlash2
+    revision: bf582e4eacc1810f76656d1811693ff6c6737d2a
+    verify: sha256_tree
+    size_gib: 2.3
+
+# Upstream's published image, the one its prepare.sh pulls by default:
+# TensorFold v0.6.0 + its 53 patches/*.patch (applied with `patch -p0` over
+# site-packages) + av 18.1.0 and xgrammar, on nvcr.io/nvidia/pytorch:26.07-py3.
+# The tag's suffix is upstream's image_hash() (sha256 of the patches and
+# IMAGE_EXTRAS); config.sh pins the digest as IMAGE_DIGEST
+# sha256:22789f0cb3dc308f0b2ce52a33961b88bd624af1725e91e8aba0a74a671bb969,
+# which `sparky pin` must reproduce. Pulled, not rebuilt: the patches are unified
+# diffs against site-packages, which sparky's build phase does not apply (a
+# `diff` edit at phase=build is inert), so carrying them would mean carrying
+# upstream's Dockerfile and its patch loop as build context. When upstream
+# changes patches/, the tag changes with them: bump it and re-pin.
+image:
+  mode: pull
+  ref: ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold:v0.6.0-ae8d1c789b47
+  digest: sha256:22789f0cb3dc308f0b2ce52a33961b88bd624af1725e91e8aba0a74a671bb969
+  architecture: arm64
+  site_root: tensorfold
+  # Left as the image's: NVIDIA's nvidia_entrypoint.sh prints its banner and
+  # license notice, then execs the command, which is how upstream runs it
+  # (`docker run ... "$IMAGE" tensorfold serve ...`).
+
+topology:
+  nodes: 2
+  tp: 2
+  fabric: roce
+  master_port: 29551   # config.sh MASTER_PORT
+  # Upstream's default (WORKER_WEIGHTS=copy): the worker keeps its own copy.
+  # Its WORKER_WEIGHTS=nfs is sparky's nfs transport, and it loads as fast
+  # (both ranks live in ~2.2 min upstream).
+  worker_transport: local
+
+# Every patch is baked into the pulled image (see `image`).
+patches: []
+
+# `tensorfold serve` flags shared by both ranks: start.sh's SERVE_ARGS at
+# config.sh's defaults. --tp/--rank/--master/--master-port and rank 0's
+# --name/--host/--port are rendered from topology, served_model_name and port.
+engine_args:
+  # The DFlash2 snapshot inside the mounted cache, as start.sh resolves it
+  # (`sparky validate` checks it names the dflash2 artifact's pinned revision).
+  drafter: /root/.cache/huggingface/hub/models--incoai--GLM-5.3-Flash-DFlash2/snapshots/bf582e4eacc1810f76656d1811693ff6c6737d2a
+  # The checkpoint's native window, which only the FP8 KV cache fits.
+  context: 1048576
+  # Requests decoded together, 1 to 4; above 1 needs DFlash2.
+  parallel: 4
+  # The reply budget of a request that sets none. TensorFold's own 4,096 can
+  # end a reply inside a tool call (agent clients set none) while GLM thinks
+  # at Max by default.
+  max-tokens: 32768
+  thinking: true
+  # Images and video: GLM's tower on rank 0, 1.05 GiB of weights + 0.75 GiB
+  # of workspace. `vision-urls: true` also fetches public https URLs.
+  vision: true
+
+# config.sh's exports at their defaults. Each TF_GLM_* is read by one of the
+# baked patches; the README's "What the patches change" has the measurements.
+engine_env:
+  # DFlash2 drafts every request, so the MTP head (1.77 GiB a Spark) is left
+  # out; TensorFold's own default, 1, loads it.
+  TF_GLM_MTP: auto
+  TF_GLM_KV: fp8                    # KV: DSA latent cache + indexer keys as e4m3 rows
+  TF_GLM_DENSE: q4                  # DENSE: BF16 dense weights as 4-bit groups of 64
+  TF_GLM_COMM: roce                 # COMM: small all-gathers as one-shot RDMA writes
+  TF_ROCE_MAX_KB: "512"             # covers the 17-32-row verify windows of 4 streams
+  TF_GLM_COPY_DRAFTS: "1"           # COPY
+  TF_GLM_COPY_MAX: "15"             # COPY_MAX
+  TF_GLM_DFLASH_POLICY: "fnc7:0.3"  # DRAFT_POLICY
+  # SPLIT=1 sets both.
+  TF_GLM_HC_SPLIT: "1"
+  TF_GLM_PREFILL_OVERLAP: "2"
+  TF_GLM_KDA_CHUNKED: "1"           # KDA_CHUNKED
+  # COPY_CODE=1 sets both.
+  TF_GLM_WIDE_GRAPHS: "16"
+  TF_GLM_COPY_REPLY_MATCH: "16"
+  # 1 moves a lone stream to the pool's first rows and evicts other
+  # conversations' kept prompts there (upstream issues #12, #13).
+  TF_GLM_MULTI_LONE: "0"
+  # Kept prompt states (TensorFold's default 8 let alternating agent sessions
+  # push each other out, issue #17); ~45 MiB each at start.
+  TF_GLM_CACHE_ENTRIES: "32"
+  TF_GLM_MULTI_PREFILL: "1"         # MULTI_PREFILL
+  TF_GLM_L2PF: "1"
+  TF_GLM_EXL3_LOADS: nc
+  TF_GLM_SHARED_PREFIX: "1"         # SHARED_PREFIX
+  # The pool beyond the window grows into MemAvailable at start minus the
+  # reserve, up to TF_GLM_CACHE_GIB a Spark: ~2.9M tokens at upstream's
+  # measured start. The server peaks ~10 GiB past its own estimate, so the
+  # reserve is what leaves the head ~4.5 GiB free; raise it if anything else
+  # shares the Sparks.
+  TENSORFOLD_MEMORY_RESERVE_GIB: "14.5"   # MEMORY_RESERVE_GIB
+  TF_GLM_CACHE_GIB: "12.5"                # KV_POOL_GIB
+  TENSORFOLD_NO_UPDATE_CHECK: "1"
+  # nodes.sh's nccl_env: 4 channels. Measured between the Sparks there: a
+  # decode-sized all-gather 32 us (80 at NCCL's defaults).
+  NCCL_MIN_NCHANNELS: "4"
+  NCCL_MAX_NCHANNELS: "4"
+  # The image sets /cache/torch_extensions, a directory sparky does not mount, so
+  # every recreate would recompile the kernels (minutes). Into sparky's JIT state
+  # instead, under the image's patch hash: TensorFold finds a build by its
+  # extension's name, so another image's build of the same name must never be
+  # the one loaded. Upstream keys its kernel cache by that hash for the same
+  # reason. Bump the suffix with the image tag.
+  TORCH_EXTENSIONS_DIR: /root/.cache/sparky-jit/torch_extensions/ae8d1c789b47
+
+hostprep:
+  # config.sh MIN_FREE_GB: the checkpoint (~176 GB) and DFlash2.
+  min_free_gib: 180.0
+  shm_size: 16g
+
+docker:
+  cap_add: [IPC_LOCK]   # RoCE: the all-gather registers pinned memory
+  stop_timeout: 30      # stop.sh's STOP_TIMEOUT
+
+lanes:
+
+  # DRAFTER=mtp: the checkpoint's own MTP head, which avoids DFlash2's
+  # non-commercial license. One request at a time; the FP8 window still fits.
+  mtp:
+    description: "the checkpoint's MTP head instead of DFlash2 (no CC BY-NC-ND drafter), one request at a time"
+    artifacts: [main]
+    engine_args:
+      drafter: none
+      parallel: 1
+
+  # KV=bf16: the exact cache, at a fifth of the window (196,608 with DFlash2,
+  # vision and q4 dense weights).
+  kv-bf16:
+    description: "exact bf16 KV cache, 196,608-token window"
+    engine_args:
+      context: 196608
+    engine_env:
+      TF_GLM_KV: bf16
+
+  # DENSE=fp8: q4 can lose the end of turn on short French coding prompts, so
+  # replies run to max_tokens (upstream issue #18). fp8 keeps it, with decode
+  # ~10% slower.
+  dense-fp8:
+    description: "FP8 dense weights (non-English prompts, issue #18), ~10% slower decode"
+    engine_env:
+      TF_GLM_DENSE: fp8
+
+  # DENSE=bf16 KV=bf16 KDA_CHUNKED=0: the checkpoint as it is, bit for bit
+  # against TensorFold's serial decoding. 163,840 tokens: with bf16 dense
+  # weights the vision tower costs rank 0 ~66k tokens of window.
+  exact:
+    description: "the checkpoint served exactly: bf16 dense weights and KV, serial KDA, 163,840-token window"
+    engine_args:
+      context: 163840
+    engine_env:
+      TF_GLM_DENSE: bf16
+      TF_GLM_KV: bf16
+      TF_GLM_KDA_CHUNKED: "0"
