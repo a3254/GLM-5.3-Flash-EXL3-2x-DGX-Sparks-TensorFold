@@ -30,29 +30,41 @@ served_model_name: glm-5.3-flash
 upstream:
   repo: MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold
   branch: main
-  revision: 92bf731c3aac61927726ef0c422b21b42111f2c4
+  revision: 1576746a04983b6eded0551dbf22512ee9e95654
 
 artifacts:
-  # The same artifact as glm-5.3-flash-exl3-2x, so both recipes serve ONE
-  # cached copy. Upstream pins Mia-AiLab@9eaebb7c (config.sh MODEL_REVISION);
-  # that revision's 144 files differ from 25a44fdb only in README.md (hub
-  # manifests compared 2026-10-02), and 25a44fdb's 120 shards, tokenizer,
-  # config and index are byte-identical to the mirror's aba59d21 (see the
-  # sibling recipe). Upstream's README calls its repo a byte-identical mirror
-  # of this one. Same weights, no second 164 GiB download.
+  # Upstream's default since v1.3.3: Mia's AI Lab's own EXL3 quantization of
+  # GLM-5.3-Flash (Apache-2.0), at config.sh's MODEL_REVISION. Same format,
+  # size and speed as TR3-4bpw; KL divergence to the original 4-18% lower on
+  # every test set (its model card). Replies differ from TR3's.
   - id: main
+    source: hf
+    repo: Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold
+    revision: 078455ffe6472f9a52fbc1139f58b9db2881b25c
+    layout: hub
+    workers: 4
+    verify: sha256_tree
+    expected_shards: 83
+    size_gib: 164.0
+
+  # The checkpoint before v1.3.3, for the `tr3` lane: the same artifact as
+  # glm-5.3-flash-exl3-2x, so a fleet that runs both recipes keeps ONE cached
+  # copy. brandonmusic's aba59d21 is byte-identical in its shards, tokenizer,
+  # config and index to Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw@9eaebb7c, which
+  # upstream pinned until v1.5 (only README.md differs). 164 GiB only that lane
+  # needs, so optional.
+  - id: tr3
     source: hf
     repo: brandonmusic/GLM-5.3-Flash-tr3-4bpw
     revision: aba59d2175e1ee2887ae0ae1300ba848b1deed84
     fallback_repo: Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
-    # Upstream's own pin, rather than the sibling's 25a44fdb: README.md is the
-    # only difference between them.
     fallback_revision: 9eaebb7c4e96d983dcd538e18624622ba5b820a8
     layout: hub
     workers: 4
     verify: sha256_tree
     expected_shards: 120
     size_gib: 164.0
+    optional: true
     exclude: ["runtime-results/**", "src/**", "runtime/src/**", "scripts/**", "docs/**", "results/**", ".materialization/**", "runtime/scripts/**"]
 
   # Upstream's DFLASH2_REVISION, and the revision the sibling recipe and the
@@ -66,11 +78,11 @@ artifacts:
     size_gib: 2.3
 
 # Upstream's published image, the one its prepare.sh pulls by default:
-# TensorFold v0.6.0 + its 53 patches/*.patch (applied with `patch -p0` over
+# TensorFold v0.6.0 + its 70 patches/*.patch (applied with `patch -p0` over
 # site-packages) + av 18.1.0 and xgrammar, on nvcr.io/nvidia/pytorch:26.07-py3.
 # The tag's suffix is upstream's image_hash() (sha256 of the patches and
 # IMAGE_EXTRAS); config.sh pins the digest as IMAGE_DIGEST
-# sha256:22789f0cb3dc308f0b2ce52a33961b88bd624af1725e91e8aba0a74a671bb969,
+# sha256:ef83797d791fef96c4605e8d37367aca6de5aeac7bb672792cb682e2e55d4237,
 # which `sparky pin` must reproduce. Pulled, not rebuilt: the patches are unified
 # diffs against site-packages, which sparky's build phase does not apply (a
 # `diff` edit at phase=build is inert), so carrying them would mean carrying
@@ -78,8 +90,8 @@ artifacts:
 # changes patches/, the tag changes with them: bump it and re-pin.
 image:
   mode: pull
-  ref: ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold:v0.6.0-ae8d1c789b47
-  digest: sha256:22789f0cb3dc308f0b2ce52a33961b88bd624af1725e91e8aba0a74a671bb969
+  ref: ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold:v0.6.0-9f73cca659a1
+  digest: sha256:ef83797d791fef96c4605e8d37367aca6de5aeac7bb672792cb682e2e55d4237
   architecture: arm64
   site_root: tensorfold
   # Left as the image's: NVIDIA's nvidia_entrypoint.sh prints its banner and
@@ -108,7 +120,9 @@ engine_args:
   drafter: /root/.cache/huggingface/hub/models--incoai--GLM-5.3-Flash-DFlash2/snapshots/bf582e4eacc1810f76656d1811693ff6c6737d2a
   # The checkpoint's native window, which only the FP8 KV cache fits.
   context: 1048576
-  # Requests decoded together, 1 to 4; above 1 needs DFlash2.
+  # Requests decoded together, 1 to 8 (patch 0069); above 1 needs DFlash2.
+  # config.sh's default on two Sparks; 8 decodes ~30% more in all, but grows
+  # the memory reserve (see TENSORFOLD_MEMORY_RESERVE_GIB): the `parallel-8` lane.
   parallel: 4
   # The reply budget of a request that sets none. TensorFold's own 4,096 can
   # end a reply inside a tool call (agent clients set none) while GLM thinks
@@ -142,6 +156,20 @@ engine_env:
   # 1 moves a lone stream to the pool's first rows and evicts other
   # conversations' kept prompts there (upstream issues #12, #13).
   TF_GLM_MULTI_LONE: "0"
+  # Verify-window rows of every request together in a round (patch 0069):
+  # 32 up to 4 requests, 64 past that.
+  TF_GLM_MULTI_WINDOW: "32"
+  # Earlier turns keep their reasoning in the prompt (patch 0060), as zai-org's
+  # current template does; 1 drops it, re-prefilling agents' tool loops.
+  TF_GLM_CLEAR_THINKING: "0"
+  # Smooth streaming (patch 0061): one event a token at a steady pace from a
+  # 400 ms playout buffer, instead of ~3 tokens a round in bursts.
+  TF_GLM_STREAM_SMOOTH: "1"
+  TF_GLM_STREAM_SMOOTH_MS: "400"
+  # Concurrent prompt fills in layer slices of ~200 ms (patch 0062), drafted
+  # decode rounds between them, so other replies keep streaming during a fill.
+  TF_GLM_FILL_BUDGET_MS: "200"
+  TF_GLM_FILL_DRAFTS: "1"
   # Kept prompt states (TensorFold's default 8 let alternating agent sessions
   # push each other out, issue #17); ~45 MiB each at start.
   TF_GLM_CACHE_ENTRIES: "32"
@@ -167,7 +195,7 @@ engine_env:
   # extension's name, so another image's build of the same name must never be
   # the one loaded. Upstream keys its kernel cache by that hash for the same
   # reason. Bump the suffix with the image tag.
-  TORCH_EXTENSIONS_DIR: /root/.cache/sparky-jit/torch_extensions/ae8d1c789b47
+  TORCH_EXTENSIONS_DIR: /root/.cache/sparky-jit/torch_extensions/9f73cca659a1
 
 hostprep:
   # config.sh MIN_FREE_GB: the checkpoint (~176 GB) and DFlash2.
@@ -179,6 +207,28 @@ docker:
   stop_timeout: 30      # stop.sh's STOP_TIMEOUT
 
 lanes:
+
+  # The checkpoint before v1.3.3 (MODEL_ID=Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw):
+  # v1.3.2's replies, and the copy glm-5.3-flash-exl3-2x already caches.
+  tr3:
+    description: "the TR3-4bpw checkpoint (pre-v1.3.3 default, shared with glm-5.3-flash-exl3-2x)"
+    serves: tr3
+    artifacts: [tr3, dflash2]
+
+  # PARALLEL=8: config.sh's default on three Sparks, opt-in on two. sparkDash
+  # aggregate decode 4 -> 8 at once: prose 103.2 -> 130.8 tok/s, code 126.7 ->
+  # 167.0. The window grows to 64 rows (TF_ROCE_MAX_KB follows: 1024), and
+  # the reserve by ~0.95 GiB a request past 4 and ~0.04 a row past 32 (14.5 ->
+  # 19.6), so the head's lowest free memory stays where 4 has it; the pool
+  # shrinks instead (~1.5M tokens at 8).
+  parallel-8:
+    description: "8 requests at once (64-row verify window, larger memory reserve, smaller prompt pool)"
+    engine_args:
+      parallel: 8
+    engine_env:
+      TF_GLM_MULTI_WINDOW: "64"
+      TF_ROCE_MAX_KB: "1024"
+      TENSORFOLD_MEMORY_RESERVE_GIB: "19.6"
 
   # DRAFTER=mtp: the checkpoint's own MTP head, which avoids DFlash2's
   # non-commercial license. One request at a time; the FP8 window still fits.
