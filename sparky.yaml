@@ -104,10 +104,12 @@ topology:
   tp: 2
   fabric: roce
   master_port: 29551   # config.sh MASTER_PORT
-  # Upstream's default (WORKER_WEIGHTS=copy): the worker keeps its own copy.
-  # Its WORKER_WEIGHTS=nfs is sparky's nfs transport, and it loads as fast
-  # (both ranks live in ~2.2 min upstream).
-  worker_transport: local
+  # Upstream's WORKER_WEIGHTS=nfs, not its default `copy`: workers keep no copy
+  # of the checkpoint and DFlash2 (~166 GiB less disk each, and no copy at
+  # deploy) and read the head's cache read-only over the link. Upstream
+  # measured it as fast to load (both ranks live in ~2.2 min). sparky runs the
+  # export itself, a container on the head, a docker volume on each worker.
+  worker_transport: nfs
 
 # Every patch is baked into the pulled image (see `image`).
 patches: []
