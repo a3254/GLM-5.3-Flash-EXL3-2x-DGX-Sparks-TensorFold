@@ -264,6 +264,27 @@ lanes:
       NCCL_P2P_DISABLE: "1"
       NCCL_SHM_DISABLE: "1"
 
+  # COMM=roce ./start-tp3.sh: `tp3` with the small all-gathers as one-shot RDMA
+  # writes, each peer over the devices that share its subnet (the TP-N engine's
+  # RoCE). Each node's TF_ROCE_HCA is its own devices toward its peers, which
+  # sparky fills in on every node from the fleet probe's NCCL_IB_HCA. Upstream
+  # has measured this at two ranks (+6% decode), not at three.
+  tp3-roce:
+    description: "tp3 with the small all-gathers over RoCE instead of NCCL (unmeasured at three Sparks upstream)"
+    topology: { nodes: 3, tp: 3 }
+    engine_args:
+      parallel: 8
+    engine_env:
+      TF_GLM_MULTI_WINDOW: "64"
+      TF_ROCE_MAX_KB: "1024"
+      TENSORFOLD_MEMORY_RESERVE_GIB: "19.6"
+      TF_GLM_CACHE_GIB: "32"
+      TF_GLM_COMM: roce
+      NCCL_CROSS_NIC: "1"
+      NCCL_IB_SUBNET_AWARE_ROUTING: "1"
+      NCCL_P2P_DISABLE: "1"
+      NCCL_SHM_DISABLE: "1"
+
   # DRAFTER=mtp: the checkpoint's own MTP head, which avoids DFlash2's
   # non-commercial license. One request at a time; the FP8 window still fits.
   mtp:
