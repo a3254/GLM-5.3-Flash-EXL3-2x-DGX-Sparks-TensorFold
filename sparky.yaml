@@ -162,6 +162,14 @@ engine_env:
   # Earlier turns keep their reasoning in the prompt (patch 0060), as zai-org's
   # current template does; 1 drops it, re-prefilling agents' tool loops.
   TF_GLM_CLEAR_THINKING: "0"
+  # Off, unlike upstream (1024): the server's cache of tool steps' reasoning
+  # (patch 0036), put back into any later request presenting a matching call
+  # id or the same conversation, from any client: the API has no auth, so one
+  # client could read another's reasoning (also via /tokenize, patch 0037).
+  # A step that carries its own reasoning is unaffected; a client that drops
+  # it misses the prompt cache from that step on (omp: compat
+  # replayReasoningContent: true keeps it).
+  TF_GLM_KEEP_REASONING: "0"
   # Smooth streaming (patch 0061): one event a token at a steady pace from a
   # 400 ms playout buffer, instead of ~3 tokens a round in bursts.
   TF_GLM_STREAM_SMOOTH: "1"
