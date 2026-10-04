@@ -239,6 +239,31 @@ lanes:
       TF_ROCE_MAX_KB: "1024"
       TENSORFOLD_MEMORY_RESERVE_GIB: "19.6"
 
+  # TP=3, ./start-tp3.sh: three Sparks (experimental upstream, README "3
+  # Sparks"; patches 0066-0068 are in the image). config.sh's TP=3 defaults:
+  # PARALLEL=8 and so the 64-row window, TF_ROCE_MAX_KB 1024 and a 19.6 GiB
+  # reserve, as `parallel-8`; KV_POOL_GIB 32, since each Spark holds a third of
+  # the weights (~6M-token pool); COMM=nccl, start-tp3.sh's default, so no
+  # per-node TF_ROCE_HCA is needed. The rendezvous and NCCL's bootstrap go over
+  # the management LAN and NCCL_IB_HCA lists every RoCE device, which is what
+  # sparky wires on a ring of three; the four NCCL_* below are the rest of
+  # nodes.sh's nccl_env_n. Upstream wants a triangle of direct CX7 cables.
+  tp3:
+    description: "three Sparks, TP=3 (experimental upstream): 8 requests at once, ~6M-token prompt pool"
+    topology: { nodes: 3, tp: 3 }
+    engine_args:
+      parallel: 8
+    engine_env:
+      TF_GLM_MULTI_WINDOW: "64"
+      TF_ROCE_MAX_KB: "1024"
+      TENSORFOLD_MEMORY_RESERVE_GIB: "19.6"
+      TF_GLM_CACHE_GIB: "32"
+      TF_GLM_COMM: nccl
+      NCCL_CROSS_NIC: "1"
+      NCCL_IB_SUBNET_AWARE_ROUTING: "1"
+      NCCL_P2P_DISABLE: "1"
+      NCCL_SHM_DISABLE: "1"
+
   # DRAFTER=mtp: the checkpoint's own MTP head, which avoids DFlash2's
   # non-commercial license. One request at a time; the FP8 window still fits.
   mtp:
